@@ -34,7 +34,31 @@ class FlickrExtractor(Extractor):
 
         data = self.metadata()
         extract = self.api._extract_format
+
+        # Check if archive checking is available for early skip
+        archive_check = getattr(self, "_archive_check", None)
+
         for photo in self.photos():
+            # Early archive check: skip expensive metadata fetch if already archived
+            # This optimization works for extractors where archive format only requires
+            # data available before metadata fetch (e.g., FlickrUserExtractor, FlickrFavoriteExtractor)
+            if archive_check:
+                try:
+                    # Build minimal kwdict for archive format check
+                    kwdict = {"id": photo["id"]}
+
+                    # Add user[nsid] if archive format requires it and we have user data
+                    archive_fmt = getattr(self, "archive_fmt", "{id}")
+                    if "user" in archive_fmt and hasattr(self, "user") and self.user:
+                        kwdict["user"] = {"nsid": self.user.get("nsid", "")}
+
+                    if archive_check(kwdict):
+                        # Photo is already in archive, skip expensive operations
+                        continue
+                except Exception as exc:
+                    # If archive check fails, proceed normally
+                    self.log.debug("Archive check failed: %s", exc)
+
             try:
                 photo = extract(photo)
             except Exception as exc:

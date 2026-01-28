@@ -274,6 +274,38 @@ class Job():
         self.pred_post = self._prepare_predicates("post", False)
         self.pred_queue = self._prepare_predicates("chapter", False)
 
+        # Create archive early to enable extractor-level archive checking
+        # This allows extractors to skip expensive metadata fetches for archived items
+        extr = self.extractor
+        cfg = extr.config
+        if archive_path := cfg("archive"):
+            archive_table = cfg("archive-table")
+            archive_prefix = cfg("archive-prefix")
+            if archive_prefix is None:
+                archive_prefix = extr.category if archive_table is None else ""
+
+            archive_format = cfg("archive-format")
+            if archive_format is None:
+                archive_format = extr.archive_fmt
+
+            try:
+                self.archive = archive.connect(
+                    archive_path,
+                    archive_prefix,
+                    archive_format,
+                    archive_table,
+                    cfg("archive-mode"),
+                    cfg("archive-pragma"),
+                    None,  # kwdict not needed for early creation
+                )
+                # Provide archive check callback to extractor
+                extr._archive_check = lambda kwdict: self.archive.check(kwdict)
+                extr.log.debug("Archive available for early checking")
+            except Exception as exc:
+                extr.log.warning(
+                    "Failed to open download archive at '%s' (%s: %s)",
+                    archive_path, exc.__class__.__name__, exc)
+
     def _prepare_predicates(self, target, skip):
         predicates = []
         extr = self.extractor
@@ -589,7 +621,23 @@ class DownloadJob(Job):
             # monkey-patch method to do nothing and always return True
             self.download = pathfmt.fix_extension
 
-        if archive_path := cfg("archive"):
+        # Archive is created in _init() for early checking
+        # Here we just configure archive write events
+        if self.archive is not None:
+            events = cfg("archive-event")
+            if events is None:
+                self._archive_write_file = True
+                self._archive_write_skip = False
+                self._archive_write_after = False
+            else:
+                if isinstance(events, str):
+                    events = events.split(",")
+                self._archive_write_file = ("file" in events)
+                self._archive_write_skip = ("skip" in events)
+                self._archive_write_after = ("after" in events)
+        elif archive_path := cfg("archive"):
+            # Fallback: create archive here if not created in _init()
+            # (shouldn't happen, but keep for safety)
             archive_table = cfg("archive-table")
             archive_prefix = cfg("archive-prefix")
             if archive_prefix is None:
@@ -609,24 +657,13 @@ class DownloadJob(Job):
                     cfg("archive-pragma"),
                     kwdict,
                 )
+                # Provide archive check callback to extractor
+                extr._archive_check = lambda kwdict: self.archive.check(kwdict)
+                extr.log.debug("Using download archive '%s'", archive_path)
             except Exception as exc:
                 extr.log.warning(
                     "Failed to open download archive at '%s' (%s: %s)",
                     archive_path, exc.__class__.__name__, exc)
-            else:
-                extr.log.debug("Using download archive '%s'", archive_path)
-
-                events = cfg("archive-event")
-                if events is None:
-                    self._archive_write_file = True
-                    self._archive_write_skip = False
-                    self._archive_write_after = False
-                else:
-                    if isinstance(events, str):
-                        events = events.split(",")
-                    self._archive_write_file = ("file" in events)
-                    self._archive_write_skip = ("skip" in events)
-                    self._archive_write_after = ("after" in events)
 
         if skip := cfg("skip", True):
             self._skipexc = None
