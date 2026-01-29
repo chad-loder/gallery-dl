@@ -19,7 +19,7 @@ class AnadoluExtractor(Extractor):
     category = "anadolu"
     root = "https://www.anadoluimages.com"
     filename_fmt = "{id}.{extension}"
-    directory_fmt = ("{category}", "{event_title}")
+    directory_fmt = ("{category}", "{publishDate[:10]}", "{event_title}")
     archive_fmt = "anadolu_{id}"
     request_interval = (1.0, 2.0)
     request_interval_min = 0.5
