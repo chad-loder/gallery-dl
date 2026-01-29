@@ -30,6 +30,7 @@ class AnadoluExtractor(Extractor):
     def items(self):
         for item in self.media():
             data = self._transform_item(item)
+            data["source_url"] = self.url  # Original URL used to find this item
 
             # Get preview URL (largest free version)
             url = data.get("imageUrl") or ""

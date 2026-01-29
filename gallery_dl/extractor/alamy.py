@@ -139,7 +139,10 @@ class AlamySearchExtractor(AlamyExtractor):
         query_slug, params = self.groups
         self.search_query = text.unquote(query_slug.replace("-", " "))
         self.params = text.parse_query(params) if params else {}
-        return {"search_query": self.search_query}
+        return {
+            "search_query": self.search_query,
+            "source_url": self.url,  # Original URL used to find this item
+        }
 
     def media(self):
         # Map URL params to API params
@@ -187,7 +190,9 @@ class AlamyImageExtractor(AlamyExtractor):
 
     def metadata(self):
         self.slug, self.image_seq = self.groups
-        return {}
+        return {
+            "source_url": self.url,  # Original URL used to find this item
+        }
 
     def media(self):
         # Search for this specific image by its sequence ID
