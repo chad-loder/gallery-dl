@@ -18,6 +18,7 @@ modules = [
     "mtime",
     "python",
     "rename",
+    "trim",
     "ugoira",
     "zip",
 ]

@@ -19,7 +19,8 @@ class AnadoluExtractor(Extractor):
     category = "anadolu"
     root = "https://www.anadoluimages.com"
     filename_fmt = "{id}.{extension}"
-    directory_fmt = ("{category}", "{publishDate[:10]}", "{event_title}")
+    # Default: Anadolu/Photographer Name/Date/
+    directory_fmt = ("{category}", "{channelName}", "{publishDate[:10]}")
     archive_fmt = "anadolu_{id}"
     request_interval = (1.0, 2.0)
     request_interval_min = 0.5
@@ -69,14 +70,17 @@ class AnadoluExtractor(Extractor):
         # Build detail page URL
         detail_url = f"{self.root}/p/{seo}/{item_id}" if seo else ""
 
+        # Fetch additional metadata from detail page
+        detail_data = self._get_detail_page_data(detail_url)
+
         # Build sidecar-compatible data structure
         data = {
             # Core sidecar fields
             "url": detail_url,
             "title": title,
-            "description": title,  # API doesn't provide full description
-            "channelId": "anadoluimages.com",
-            "channelName": "Anadolu Images",
+            "description": detail_data.get("description") or title,
+            "channelId": text.slugify(detail_data.get("photographer", "")),
+            "channelName": detail_data.get("photographer") or "Anadolu Images",
             "publishDate": pub_date,
             "postId": str(item_id),
             "imageUrl": image_url,
@@ -88,13 +92,11 @@ class AnadoluExtractor(Extractor):
             "source": "AA" if item.get("Source") == 1 else "Custom",
             "editorChoice": item.get("EChoice", False),
 
-            # TODO: The following fields could be obtained by parsing the
-            # detail page HTML at /p/{seo}/{id}:
-            # - photographer: Photographer name
-            # - location: Geographic location
-            # - anadoluId: AA-prefixed ID (e.g., "AA-40396329")
-            # - keywords: Array of tags/keywords
-            # - fullDescription: Complete caption text
+            # Fields from detail page
+            "photographer": detail_data.get("photographer"),
+            "location": detail_data.get("location"),
+            "anadoluId": detail_data.get("anadoluId"),
+            "anadoluCategory": detail_data.get("category"),
         }
 
         # Add event data if provided
@@ -107,6 +109,62 @@ class AnadoluExtractor(Extractor):
             data["event_title"] = title
 
         return data
+
+    def _get_detail_page_data(self, detail_url):
+        """Fetch detail page and extract additional metadata
+
+        Extracts: photographer, location, anadoluId, category, description
+        """
+        result = {
+            "photographer": None,
+            "location": None,
+            "anadoluId": None,
+            "category": None,
+            "description": None,
+        }
+
+        if not detail_url:
+            return result
+
+        try:
+            response = self.request(detail_url)
+            html = response.text
+
+            # Extract photographer: <a id="lnkPhotographer" href="Name">
+            result["photographer"] = text.extr(
+                html, 'id="lnkPhotographer" href="', '"'
+            ) or None
+
+            # Extract AA ID: AA-12345678 (appears in format AA-40396441)
+            aa_id = text.extr(html, "AA-", "<")
+            if aa_id and aa_id.isdigit():
+                result["anadoluId"] = "AA-" + aa_id
+
+            # Extract location: <a id="lnkLocation" ...>Location Name</a>
+            result["location"] = text.extr(
+                html, 'id="lnkLocation"', '</a>'
+            )
+            if result["location"]:
+                # Extract just the text after the last >
+                result["location"] = result["location"].rpartition(">")[2]
+
+            # Extract category: <li>Category<span>News</span>
+            result["category"] = text.extr(
+                html, "<li>Category<span>", "</span>"
+            ) or None
+
+            # Extract full description from og:description meta tag
+            desc = text.extr(
+                html, 'property="og:description" content="', '"'
+            )
+            if desc:
+                result["description"] = text.unescape(desc)
+
+        except Exception as e:
+            self.log.debug("Failed to get detail page data for %s: %s",
+                           detail_url, e)
+
+        return result
 
 
 class AnadoluCollectionExtractor(AnadoluExtractor):

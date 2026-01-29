@@ -350,6 +350,14 @@ def detect_challenge(response):
                 b"/ddos-guard/js-challenge/" in response.content:
             return "DDoS-Guard challenge"
 
+    # DataDome protection (detected via header, not server)
+    if response.headers.get("x-datadome"):
+        if response.status_code == 403:
+            content = response.content
+            if b"captcha-delivery.com" in content or \
+                    b"Please enable JS" in content:
+                return "DataDome challenge"
+
 
 @functools.lru_cache(maxsize=None)
 def git_head():
