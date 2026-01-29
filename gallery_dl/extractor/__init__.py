@@ -25,6 +25,7 @@ modules = [
     "agnph",
     "ahottie",
     "alamy",
+    "anadolu",
     "ao3",
     "arcalive",
     "architizer",
