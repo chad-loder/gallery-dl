@@ -394,3 +394,346 @@ class IcelistFileExtractor(IcelistExtractor):
 
         yield Message.Directory, "", data
         yield Message.Url, info["url"], data
+
+
+class IcelistCategoryExtractor(IcelistExtractor):
+    """Extractor for ICE List Wiki category pages (e.g., Category:Agents)
+    
+    Paginates through all category members and visits each page.
+    For agent pages, extracts structured metadata from the Agent page template.
+    """
+    subcategory = "category"
+    pattern = BASE_PATTERN + r"/index\.php\?title=Category:([^&#]+)"
+    example = "https://wiki.icelist.is/index.php?title=Category:Agents"
+    
+    # Agent pages may not have images, so we need different defaults
+    filename_fmt = "{agent_name_slug}.{extension}"
+    directory_fmt = ("{category}", "agents", "{state}")
+    archive_fmt = "icelist_agent_{pageid}"
+
+    def __init__(self, match):
+        IcelistExtractor.__init__(self, match)
+        self.category_name = match.group(1)
+
+    def items(self):
+        category_title = f"Category:{self.category_name}"
+        self.log.info("Fetching members of %s", category_title)
+        
+        # Paginate through category members
+        members = list(self._get_category_members(category_title))
+        self.log.info("Found %d pages in category", len(members))
+        
+        # Process each member page
+        for member in members:
+            page_title = member["title"]
+            pageid = member["pageid"]
+            
+            # Get page content
+            wikitext = self._get_page_wikitext(page_title)
+            if not wikitext:
+                self.log.debug("Could not fetch: %s", page_title)
+                continue
+            
+            # Parse agent page template
+            agent_data = self._parse_agent_page(wikitext, page_title, pageid)
+            if not agent_data:
+                self.log.debug("No agent template found: %s", page_title)
+                continue
+            
+            # Check if there's an actual image (not nopfp.png)
+            image_file = agent_data.get("image", "")
+            has_image = image_file and image_file.lower() != "nopfp.png"
+            
+            if has_image:
+                # Get image info and yield with URL
+                file_title = f"File:{image_file}"
+                image_info = self._get_image_info([file_title])
+                
+                if file_title in image_info:
+                    info = image_info[file_title]
+                    if info.get("url"):
+                        agent_data["file_url"] = info["url"]
+                        agent_data["file_title"] = file_title
+                        agent_data["width"] = info["width"]
+                        agent_data["height"] = info["height"]
+                        agent_data["filesize"] = info["size"]
+                        agent_data["mime"] = info["mime"]
+                        agent_data["upload_timestamp"] = info["timestamp"]
+                        agent_data["uploader"] = info["user"]
+                        agent_data["sha1"] = info["sha1"]
+                        agent_data["extension"] = info["url"].rpartition(".")[2].lower()
+                        
+                        yield Message.Directory, "", agent_data
+                        yield Message.Url, info["url"], agent_data
+                        continue
+            
+            # No image or image fetch failed - yield metadata only
+            # Use a dummy URL that will create a .json sidecar via metadata PP
+            agent_data["extension"] = "json"
+            yield Message.Directory, "", agent_data
+            # Yield a special marker for metadata-only entries
+            yield Message.Url, "text:" + json.dumps(agent_data, indent=2), agent_data
+
+    def _get_category_members(self, category_title):
+        """Paginate through all members of a category"""
+        continue_token = None
+        
+        while True:
+            params = {
+                "action": "query",
+                "list": "categorymembers",
+                "cmtitle": category_title,
+                "cmlimit": "500",
+                "cmtype": "page",  # Only pages, not subcategories
+            }
+            
+            if continue_token:
+                params["cmcontinue"] = continue_token
+            
+            data = self._api_call(**params)
+            
+            if "query" not in data or "categorymembers" not in data["query"]:
+                break
+            
+            members = data["query"]["categorymembers"]
+            for member in members:
+                yield member
+            
+            # Check for more pages
+            if "continue" in data and "cmcontinue" in data["continue"]:
+                continue_token = data["continue"]["cmcontinue"]
+                self.log.debug("Fetching next page of category members...")
+            else:
+                break
+
+    def _parse_agent_page(self, wikitext, page_title, pageid):
+        """Parse an agent page and extract structured data
+        
+        Extracts:
+        - Template fields (name, agency, role, field_office, state, status, image, verification, summary)
+        - All wiki links
+        - All external links (LinkedIn, social media, etc.)
+        - Section content (Evidence and Sources, Notes)
+        """
+        # Find the Agent page template
+        template_match = re.search(
+            r'\{\{Agent page\s*\n(.*?)\}\}',
+            wikitext,
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        if not template_match:
+            return None
+        
+        template_content = template_match.group(1)
+        
+        # Parse template fields
+        fields = {}
+        for m in re.finditer(r'\|(\w+)\s*=\s*([^\n|]*?)(?=\n\||$)', template_content, re.DOTALL):
+            key = m.group(1).strip().lower()
+            value = m.group(2).strip()
+            fields[key] = value
+        
+        # Build agent name slug for filename
+        agent_name = fields.get("name", page_title)
+        agent_name_slug = re.sub(r'[^\w\s-]', '', agent_name)
+        agent_name_slug = re.sub(r'\s+', '_', agent_name_slug)
+        
+        # Extract all wiki links from the entire page
+        wiki_links = []
+        for m in re.finditer(r'\[\[([^\]|]+)(?:\|([^\]]+))?\]\]', wikitext):
+            target = m.group(1).strip()
+            display = (m.group(2) or target).strip()
+            
+            # Skip file/image links and categories
+            if target.lower().startswith(('file:', 'image:', 'category:')):
+                continue
+            
+            wiki_url = f"{self.root}/index.php/{target.replace(' ', '_')}"
+            wiki_links.append({
+                "title": target,
+                "text": display,
+                "url": wiki_url
+            })
+        
+        # Extract all external URLs (clean tracking params)
+        external_links = []
+        # Bracketed external links [url text]
+        for m in re.finditer(r'\[(https?://[^\s\]]+)(?:\s+([^\]]*))?\]', wikitext):
+            cleaned = text.clean_url(m.group(1))
+            if cleaned not in external_links:
+                external_links.append(cleaned)
+        
+        # Bare URLs
+        for m in re.finditer(r'(?<!\[)(https?://[^\s\]<>\)]+)', wikitext):
+            cleaned = text.clean_url(m.group(1))
+            if cleaned not in external_links:
+                external_links.append(cleaned)
+        
+        # Extract specific sections
+        evidence_section = self._extract_section(wikitext, "Evidence and Sources")
+        notes_section = self._extract_section(wikitext, "Notes")
+        
+        # Extract categories
+        categories = re.findall(r'\[\[Category:([^\]]+)\]\]', wikitext)
+        
+        # Parse state from template (may have wiki link syntax)
+        state_raw = fields.get("state", "Unknown")
+        state = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', r'\1', state_raw)
+        
+        # Parse agency from template
+        agency_raw = fields.get("agency", "")
+        agency = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', r'\1', agency_raw)
+        
+        # Parse role from template
+        role_raw = fields.get("role", "")
+        role = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', r'\1', role_raw)
+        
+        # Parse field office from template
+        field_office_raw = fields.get("field_office", "")
+        field_office = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', r'\1', field_office_raw)
+        
+        # Parse verification from template
+        verification_raw = fields.get("verification", "")
+        verification = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', r'\1', verification_raw)
+        
+        return {
+            # Standard fields
+            "category": self.category,
+            "subcategory": "agent",
+            
+            # Page metadata
+            "pageid": pageid,
+            "page_title": page_title,
+            "page_url": f"{self.root}/index.php/{page_title.replace(' ', '_')}",
+            
+            # Agent template fields
+            "agent_name": agent_name,
+            "agent_name_slug": agent_name_slug,
+            "agency": agency,
+            "role": role,
+            "field_office": field_office,
+            "state": state or "Unknown",
+            "status": fields.get("status", ""),
+            "image": fields.get("image", ""),
+            "verification": verification,
+            "summary": fields.get("summary", ""),
+            
+            # Raw template fields (with wiki syntax preserved)
+            "agency_raw": agency_raw,
+            "role_raw": role_raw,
+            "field_office_raw": field_office_raw,
+            "state_raw": state_raw,
+            "verification_raw": verification_raw,
+            
+            # Links
+            "wiki_links": wiki_links,
+            "external_links": external_links,
+            
+            # Sections
+            "evidence_sources": evidence_section,
+            "notes": notes_section,
+            
+            # Categories
+            "page_categories": categories,
+            
+            # Filename
+            "filename": agent_name_slug,
+        }
+
+    def _extract_section(self, wikitext, section_name):
+        """Extract content of a named section from wikitext"""
+        # Match section header (== Section Name ==) and content until next section or end
+        pattern = rf'==\s*{re.escape(section_name)}\s*==\s*\n(.*?)(?=\n==|\[\[Category:|$)'
+        match = re.search(pattern, wikitext, re.DOTALL | re.IGNORECASE)
+        
+        if match:
+            content = match.group(1).strip()
+            # Remove template calls like {{IncidentsForAgent}}
+            content = re.sub(r'\{\{[^}]+\}\}', '', content)
+            # Clean up italic markers
+            content = content.replace("''", "")
+            return content.strip()
+        
+        return ""
+
+
+class IcelistAgentExtractor(IcelistExtractor):
+    """Extractor for individual ICE List Wiki agent pages"""
+    subcategory = "agent"
+    # Match agent pages that are NOT File:, Category:, or Special:
+    pattern = BASE_PATTERN + r"/index\.php/(?!File:|Category:|Special:)([^?#]+)"
+    example = "https://wiki.icelist.is/index.php/A.,_John"
+    
+    filename_fmt = "{agent_name_slug}.{extension}"
+    directory_fmt = ("{category}", "agents", "{state}")
+    archive_fmt = "icelist_agent_{pageid}"
+
+    def __init__(self, match):
+        IcelistExtractor.__init__(self, match)
+        self.page_title = match.group(1).replace("_", " ")
+
+    def items(self):
+        # Get page content
+        wikitext = self._get_page_wikitext(self.page_title)
+        if not wikitext:
+            self.log.error("Could not fetch page: %s", self.page_title)
+            return
+        
+        # Get page ID
+        page_info = self._api_call(
+            action="query",
+            titles=self.page_title,
+            prop="info"
+        )
+        
+        pageid = 0
+        if "query" in page_info and "pages" in page_info["query"]:
+            for pid, pdata in page_info["query"]["pages"].items():
+                if pid != "-1":
+                    pageid = int(pid)
+                    break
+        
+        # Use category extractor's parsing logic
+        cat_extractor = IcelistCategoryExtractor.__new__(IcelistCategoryExtractor)
+        cat_extractor.root = self.root
+        cat_extractor.category = self.category
+        
+        agent_data = cat_extractor._parse_agent_page(wikitext, self.page_title, pageid)
+        
+        if not agent_data:
+            # Not an agent page - might be a table page like Unidentified
+            # Fall through to article extractor behavior
+            self.log.debug("No agent template, checking for table...")
+            return
+        
+        # Check for image
+        image_file = agent_data.get("image", "")
+        has_image = image_file and image_file.lower() != "nopfp.png"
+        
+        if has_image:
+            file_title = f"File:{image_file}"
+            image_info = self._get_image_info([file_title])
+            
+            if file_title in image_info:
+                info = image_info[file_title]
+                if info.get("url"):
+                    agent_data["file_url"] = info["url"]
+                    agent_data["file_title"] = file_title
+                    agent_data["width"] = info["width"]
+                    agent_data["height"] = info["height"]
+                    agent_data["filesize"] = info["size"]
+                    agent_data["mime"] = info["mime"]
+                    agent_data["upload_timestamp"] = info["timestamp"]
+                    agent_data["uploader"] = info["user"]
+                    agent_data["sha1"] = info["sha1"]
+                    agent_data["extension"] = info["url"].rpartition(".")[2].lower()
+                    
+                    yield Message.Directory, "", agent_data
+                    yield Message.Url, info["url"], agent_data
+                    return
+        
+        # No image - yield metadata only
+        agent_data["extension"] = "json"
+        yield Message.Directory, "", agent_data
+        yield Message.Url, "text:" + json.dumps(agent_data, indent=2), agent_data
