@@ -344,3 +344,167 @@ unquote = urllib.parse.unquote
 
 escape = html.escape
 unescape = html.unescape
+
+
+# =============================================================================
+# URL Tracking Parameter Removal
+# =============================================================================
+
+# Common tracking parameters from various ad/analytics platforms
+# Sources: uBlock Origin, AdGuard URL Tracking Protection lists
+TRACKING_PARAMS = frozenset((
+    # Google Analytics / Ads
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "utm_source_platform",
+    "utm_creative_format",
+    "utm_marketing_tactic",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "gbraid",
+    "wbraid",
+    "_ga",
+    "_gl",
+
+    # Facebook / Meta
+    "fbclid",
+    "fb_action_ids",
+    "fb_action_types",
+    "fb_source",
+    "fb_ref",
+    "fref",
+    "hrc",
+
+    # Twitter / X
+    "twclid",
+
+    # Microsoft / Bing
+    "msclkid",
+
+    # Adobe / Omniture
+    "cid",
+    "icid",
+    "s_kwcid",
+
+    # Mailchimp
+    "mc_cid",
+    "mc_eid",
+
+    # HubSpot
+    "hsa_acc",
+    "hsa_cam",
+    "hsa_grp",
+    "hsa_ad",
+    "hsa_src",
+    "hsa_tgt",
+    "hsa_kw",
+    "hsa_mt",
+    "hsa_net",
+    "hsa_ver",
+    "_hsenc",
+    "_hsmi",
+    "__hstc",
+    "__hsfp",
+    "hsctaTracking",
+
+    # Marketo
+    "mkt_tok",
+
+    # Klaviyo
+    "_kx",
+
+    # Drip
+    "__s",
+
+    # Vero
+    "vero_id",
+    "vero_conv",
+
+    # Various affiliate / tracking
+    "ref_src",
+    "ref_url",
+
+    # Social sharing / platform-specific
+    "si",       # Spotify/TikTok
+    "igshid",   # Instagram
+    "igsh",     # Instagram
+
+    # Analytics
+    "_branch_match_id",
+    "_branch_referrer",
+    "trk",
+    "trk_contact",
+    "trk_msg",
+    "trk_module",
+    "trk_sid",
+
+    # Misc tracking
+    "oly_anon_id",
+    "oly_enc_id",
+    "otc",
+    "ndclid",
+    "usqp",     # Google
+    "biw",
+    "bih",
+    "sclient",
+    "ei",
+    "ved",
+    "uact",
+    "sxsrf",    # Google search
+))
+
+
+def clean_url(url):
+    """Remove tracking parameters from a URL
+
+    Uses urllib.parse for proper URL parsing. Returns the cleaned URL,
+    or the original if parsing fails or URL is not http/https.
+
+    Args:
+        url: URL string to clean (can be None)
+
+    Returns:
+        Cleaned URL string, or original/None if invalid
+    """
+    if not url:
+        return url
+
+    # Skip non-http URLs
+    if not url.startswith(("http://", "https://")):
+        return url
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+
+        # Parse query string, keeping lists for repeated params
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+
+        # Filter out tracking parameters (case-insensitive check)
+        cleaned_params = {
+            k: v for k, v in params.items()
+            if k.lower() not in TRACKING_PARAMS
+        }
+
+        # Rebuild query string
+        # parse_qs returns lists, urlencode with doseq handles them
+        new_query = urllib.parse.urlencode(cleaned_params, doseq=True)
+
+        # Reconstruct URL with cleaned query
+        cleaned = urllib.parse.urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment,
+        ))
+
+        return cleaned
+    except Exception:
+        # Return original if URL parsing fails
+        return url

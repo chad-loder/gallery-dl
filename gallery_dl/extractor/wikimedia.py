@@ -230,6 +230,11 @@ BASE_PATTERN = WikimediaExtractor.update({
         "api-path": "/w/api.php",
         "useragent": "Googlebot-Image/1.0",
     },
+    "icelist": {
+        "root": "https://wiki.icelist.is",
+        "pattern": r"wiki\.icelist\.is",
+        "api-path": "/api.php",
+    },
 })
 
 
